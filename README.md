@@ -93,7 +93,7 @@ jobs:
     uses: stevei101/infrastructure/.github/workflows/tfsec-scan-reusable.yml@main
     with:
       terraform_path: 'terraform'
-      severity_levels: 'MEDIUM,HIGH,CRITICAL'
+      minimum_severity: 'MEDIUM'
       fail_on_issues: true
     secrets:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

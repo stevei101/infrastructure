@@ -8,10 +8,10 @@ on:
         required: false
         default: 'terraform'
         type: string
-      severity_levels:
-        description: 'Comma-separated severity levels to check (MEDIUM,HIGH,CRITICAL)'
+      minimum_severity:
+        description: 'Minimum severity level to report (CRITICAL, HIGH, MEDIUM, LOW)'
         required: false
-        default: 'MEDIUM,HIGH,CRITICAL'
+        default: 'MEDIUM'
         type: string
       fail_on_issues:
         description: 'Fail the workflow if security issues are found'
@@ -42,7 +42,7 @@ jobs:
           working_directory: ${{ inputs.terraform_path }}
           soft_fail: ${{ !inputs.fail_on_issues }}
           format: default
-          severity: ${{ inputs.severity_levels }}
+          minimum_severity: "MEDIUM"
 
       - name: Comment PR with TFSec Results
         if: github.event_name == 'pull_request'
