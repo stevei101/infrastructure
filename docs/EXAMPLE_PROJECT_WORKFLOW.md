@@ -32,7 +32,6 @@ jobs:
       TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
       WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ## For product-baseline-opensource Project
