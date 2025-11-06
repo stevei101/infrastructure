@@ -75,6 +75,30 @@ Terraform configuration for the Product Baseline Open Source project, including:
    terraform apply
    ```
 
+### Security Scanning with TFSec
+
+The repository includes automated TFSec security scanning:
+
+- **Workflow**: `.github/workflows/tfsec-scan.yml`
+- **Reusable Workflow**: `.github/workflows/tfsec-scan-reusable.yml`
+- **Scans**: All Terraform configurations for security vulnerabilities
+- **Runs**: On push, pull requests, and manual triggers
+
+**Using the reusable workflow in your project:**
+
+```yaml
+# In your project's .github/workflows/security.yml
+jobs:
+  tfsec:
+    uses: stevei101/infrastructure/.github/workflows/tfsec-scan-reusable.yml@main
+    with:
+      terraform_path: 'terraform'
+      severity_levels: 'MEDIUM,HIGH,CRITICAL'
+      fail_on_issues: true
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
 ### Using GitHub Actions Workflows
 
 The workflows in `.github/workflows/` are designed to be called from the respective project repositories. Each project repository should reference these workflows using the `workflow_call` trigger.
