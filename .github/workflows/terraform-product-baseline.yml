@@ -1,0 +1,493 @@
+name: 'Terraform Cloud'
+
+on:
+  push:
+    branches: [ main, flux-kustomize ]
+    paths: 
+      - 'terraform/**'
+      - '.github/workflows/terraform.yml'
+      - '**/*.tf'
+      - '**/*.tfvars'
+      - '**/*.tfvars.json'
+  pull_request:
+    branches: [ main, flux-kustomize ]
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/terraform.yml'
+      - '**/*.tf'
+      - '**/*.tfvars'
+      - '**/*.tfvars.json'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      destroy:
+        description: 'Destroy all resources?'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write  # Required for Workload Identity Federation
+
+env:
+  TF_CLOUD_ORGANIZATION: "disposable-org"
+  TF_WORKSPACE: "product-baseline-opensource"
+  TF_API_TOKEN: "${{ secrets.TF_API_TOKEN }}"
+
+jobs:
+  terraform:
+    name: 'Terraform'
+    runs-on: ubuntu-latest
+    environment: production
+
+    # Set Terraform Cloud variables as environment variables
+    env:
+      TF_VAR_gcp_project_id: ${{ secrets.GCP_PROJECT_ID }}
+      TF_VAR_POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+      TF_VAR_environment: "production"
+      TF_VAR_GCP_SA_KEY: ""  # Empty for local execution
+      TF_VAR_create_kubernetes_resources: "false"  # Disable Kubernetes resources for now
+      TF_VAR_cert_manager_email: "${{ vars.CERT_MANAGER_EMAIL || 'YOUR_PERSONAL_EMAIL@example.com' }}"  # Use GitHub variable or update default
+      TF_VAR_cert_manager_create_staging: "false"  # Don't create staging issuer
+      TF_CLI_ARGS: "-no-color"
+      TF_CLOUD_WORKSPACE_EXECUTION_MODE: "local"
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Authenticate to Google Cloud via Workload Identity Federation
+      id: auth
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+        service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+        token_format: 'access_token'
+        access_token_lifetime: '3600s'
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Export GCP Credentials for Terraform
+      run: |
+        echo "GOOGLE_OAUTH_ACCESS_TOKEN=${{ steps.auth.outputs.access_token }}" >> $GITHUB_ENV
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.13.0"
+        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+        terraform_wrapper: false  # Disable wrapper to allow local execution
+
+    - name: Terraform Format
+      id: fmt
+      working-directory: ./terraform
+      run: terraform fmt -check
+      continue-on-error: true
+
+    - name: Terraform Init
+      id: init
+      env:
+        TF_VAR_google_access_token: ${{ steps.auth.outputs.access_token }}
+      working-directory: ./terraform
+      run: terraform init -compact-warnings
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+
+    - name: Install gke-gcloud-auth-plugin
+      run: |
+        gcloud components install gke-gcloud-auth-plugin --quiet
+
+    - name: Configure kubectl for GKE
+      run: |
+        # Get cluster name from Terraform output (cluster must exist first)
+        CLUSTER_NAME="product-baseline"  # Hardcoded from gke.tf
+        CLUSTER_REGION="${GKE_REGION:-us-central1}"
+        PROJECT_ID="${{ secrets.GCP_PROJECT_ID }}"
+        
+        echo "Configuring kubectl for cluster: ${CLUSTER_NAME} in ${CLUSTER_REGION}"
+        gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+          --region "${CLUSTER_REGION}" \
+          --project "${PROJECT_ID}" || {
+          echo "⚠️  Could not configure kubectl - cluster may not exist yet"
+          echo "This is OK if this is the first Terraform run"
+        }
+
+    - name: Verify kubectl is available
+      run: |
+        echo "🔍 Verifying kubectl is available..."
+        kubectl version --client || echo "⚠️  kubectl not found"
+        echo "✅ kubectl verification complete"
+        echo "ℹ️  Note: cert-manager is now managed via Helm chart, not Terraform"
+
+    - name: Remove Kubernetes Resources from State
+      working-directory: ./terraform
+      run: |
+        echo "🧹 Removing Kubernetes resources from Terraform state..."
+        
+        # Remove Kubernetes service account from state (if it exists)
+        terraform state rm kubernetes_service_account.app_ksa 2>/dev/null || echo "Kubernetes service account not in state"
+        
+        # Remove IAM member that depends on Kubernetes service account (if it exists)
+        terraform state rm google_service_account_iam_member.gke_application_sa_impersonation 2>/dev/null || echo "IAM member not in state"
+        
+        echo "✅ Kubernetes resources removed from state"
+
+    - name: Import Existing Resources
+      working-directory: ./terraform
+      run: |
+        echo "🔍 Checking for existing resources to import..."
+        
+        # Set project ID for imports
+        PROJECT_ID="${{ secrets.GCP_PROJECT_ID }}"
+        echo "Using project ID: ${PROJECT_ID}"
+        
+        # Check if resources exist and import them
+        echo "Checking for service account..."
+        if gcloud iam service-accounts describe "gke-application-sa@${PROJECT_ID}.iam.gserviceaccount.com" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+          # Check if already managed by Terraform
+          if terraform state show google_service_account.gke_application_sa >/dev/null 2>&1; then
+            echo "Service account already managed by Terraform, skipping import"
+          else
+            echo "Importing service account..."
+            terraform import google_service_account.gke_application_sa "projects/${PROJECT_ID}/serviceAccounts/gke-application-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+          fi
+        else
+          echo "Service account does not exist, skipping import"
+        fi
+        
+        echo "Checking for storage bucket..."
+        BUCKET_NAME="${PROJECT_ID}-frontend-bucket"
+        if gsutil ls "gs://${BUCKET_NAME}" >/dev/null 2>&1; then
+          # Check if already managed by Terraform
+          if terraform state show google_storage_bucket.site >/dev/null 2>&1; then
+            echo "Storage bucket already managed by Terraform, skipping import"
+          else
+            echo "Importing storage bucket..."
+            terraform import google_storage_bucket.site "${BUCKET_NAME}"
+          fi
+        else
+          echo "Storage bucket does not exist, skipping import"
+        fi
+        
+        echo "Checking for artifact registry..."
+        if gcloud artifacts repositories describe "app-images" --location="us-central1" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+          # Check if already managed by Terraform
+          if terraform state show google_artifact_registry_repository.docker_repo >/dev/null 2>&1; then
+            echo "Artifact registry already managed by Terraform, skipping import"
+          else
+            echo "Importing artifact registry..."
+            terraform import google_artifact_registry_repository.docker_repo "projects/${PROJECT_ID}/locations/us-central1/repositories/app-images"
+          fi
+        else
+          echo "Artifact registry does not exist, skipping import"
+        fi
+        
+        echo "Checking for GitHub Actions service account..."
+        if gcloud iam service-accounts describe "github-actions@${PROJECT_ID}.iam.gserviceaccount.com" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+          # Check if already managed by Terraform
+          if terraform state show google_service_account.github_actions_sa >/dev/null 2>&1; then
+            echo "GitHub Actions service account already managed by Terraform, skipping import"
+          else
+            echo "Importing GitHub Actions service account..."
+            terraform import google_service_account.github_actions_sa "projects/${PROJECT_ID}/serviceAccounts/github-actions@${PROJECT_ID}.iam.gserviceaccount.com"
+          fi
+        else
+          echo "GitHub Actions service account does not exist, skipping import"
+        fi
+        
+        echo "Checking for Workload Identity Pool..."
+        if gcloud iam workload-identity-pools describe "product-baseline-pool" --location="global" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+          # Check if already managed by Terraform
+          if terraform state show google_iam_workload_identity_pool.github_pool >/dev/null 2>&1; then
+            echo "Workload Identity Pool already managed by Terraform, skipping import"
+          else
+            echo "Importing Workload Identity Pool..."
+            terraform import google_iam_workload_identity_pool.github_pool "projects/${PROJECT_ID}/locations/global/workloadIdentityPools/product-baseline-pool"
+          fi
+        else
+          echo "Workload Identity Pool does not exist, skipping import"
+        fi
+        
+        echo "Checking for Workload Identity Provider..."
+        # NOTE: WIF Provider is intentionally NOT managed by Terraform (causes 409 conflicts)
+        # It's created/managed via gcloud in the "Create WIF Provider with gcloud" step below
+        # See terraform/wif.tf for details - the resource is commented out
+        if gcloud iam workload-identity-pools providers describe "github-provider" --location="global" --workload-identity-pool="product-baseline-pool" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+          echo "Workload Identity Provider exists - managed via gcloud (not Terraform)"
+        else
+          echo "Workload Identity Provider does not exist - will be created by gcloud step"
+        fi
+        
+        echo "Checking for VPC network..."
+        if gcloud compute networks describe "gke-network" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+          # Check if already managed by Terraform
+          if terraform state show google_compute_network.vpc >/dev/null 2>&1; then
+            echo "VPC network already managed by Terraform, skipping import"
+          else
+            echo "Importing VPC network..."
+            terraform import google_compute_network.vpc "projects/${PROJECT_ID}/global/networks/gke-network"
+          fi
+        else
+          echo "VPC network does not exist, skipping import"
+        fi
+        
+        echo "Checking for subnet..."
+        if gcloud compute networks subnets describe "gke-subnet" --region="us-central1" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+          # Check if already managed by Terraform
+          if terraform state show google_compute_subnetwork.subnet >/dev/null 2>&1; then
+            echo "Subnet already managed by Terraform, skipping import"
+          else
+            echo "Importing subnet..."
+            terraform import google_compute_subnetwork.subnet "projects/${PROJECT_ID}/regions/us-central1/subnetworks/gke-subnet"
+          fi
+        else
+          echo "Subnet does not exist, skipping import"
+        fi
+        
+        echo "✅ Import process completed"
+      continue-on-error: true
+
+    - name: Terraform Validate
+      id: validate
+      env:
+        TF_VAR_google_access_token: ${{ steps.auth.outputs.access_token }}
+      working-directory: ./terraform
+      run: terraform validate -no-color -compact-warnings
+
+    - name: Terraform Plan
+      id: plan
+      if: github.event_name == 'pull_request'
+      env:
+        TF_VAR_google_access_token: ${{ steps.auth.outputs.access_token }}
+      working-directory: ./terraform
+      run: terraform plan -no-color -input=false -compact-warnings
+      continue-on-error: true
+
+    - name: Post Plan to PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      env:
+        PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+          #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+          #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+          #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+
+          <details><summary>Show Plan</summary>
+
+          \`\`\`\n
+          ${process.env.PLAN}
+          \`\`\`
+
+          </details>
+
+          *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          })
+
+    - name: Terraform Plan Status
+      if: steps.plan.outcome == 'failure'
+      run: exit 1
+
+    - name: Grant WIF Admin role to GitHub Actions SA
+      if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      run: |
+        echo "🔐 Granting Workload Identity Pool Admin role to GitHub Actions service account..."
+        
+        PROJECT_ID="${{ secrets.GCP_PROJECT_ID }}"
+        gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+          --member="serviceAccount:github-actions@${PROJECT_ID}.iam.gserviceaccount.com" \
+          --role="roles/iam.workloadIdentityPoolAdmin" \
+          --quiet || echo "Role may already be granted"
+        
+        echo "✅ Role granted"
+
+    - name: Import WIF Pool if exists
+      if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      working-directory: ./terraform
+      run: |
+        PROJECT_ID="${{ secrets.GCP_PROJECT_ID }}"
+        set -e  # Exit on error
+        
+        # Check if WIF Pool exists and import it
+        if gcloud iam workload-identity-pools describe "product-baseline-pool" --location="global" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+          echo "Workload Identity Pool exists, checking if in state..."
+          if ! terraform state show google_iam_workload_identity_pool.github_pool >/dev/null 2>&1; then
+            echo "Importing Workload Identity Pool..."
+            terraform import google_iam_workload_identity_pool.github_pool "projects/${PROJECT_ID}/locations/global/workloadIdentityPools/product-baseline-pool" || echo "⚠️ Import failed - may already be in state"
+          else
+            echo "Workload Identity Pool already in state"
+          fi
+        fi
+        
+        # Check if WIF Provider exists
+        # NOTE: Provider is intentionally NOT managed by Terraform (causes 409 conflicts)
+        # It's created/managed via gcloud in the "Create WIF Provider with gcloud" step below
+        # See terraform/wif.tf for details - the resource is commented out
+        PROVIDER_CHECK=$(gcloud iam workload-identity-pools providers describe "github-provider" --location="global" --workload-identity-pool="product-baseline-pool" --project="${PROJECT_ID}" 2>&1)
+        if echo "$PROVIDER_CHECK" | grep -q "name:"; then
+          echo "✓ WIF Provider exists in GCP - managed via gcloud (not Terraform)"
+        else
+          echo "✓ WIF Provider does not exist - will be created by gcloud step"
+        fi
+        
+        # Grant the WIF binding manually to avoid permission issues
+        # NOTE: Service account cannot set IAM policy on itself, so this may fail
+        # The binding can be set manually or via a different service account with appropriate permissions
+        echo "🔗 Setting up Workload Identity binding for GitHub Actions..."
+        PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
+        if gcloud iam service-accounts add-iam-policy-binding "github-actions@${PROJECT_ID}.iam.gserviceaccount.com" \
+          --role="roles/iam.workloadIdentityUser" \
+          --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/product-baseline-pool/attribute.repository/stevei101/product-baseline-opensource" \
+          --quiet 2>&1; then
+          echo "✅ WIF binding created successfully"
+        else
+          echo "⚠️  WIF binding may already exist or requires manual setup"
+          echo "This is OK - binding can be set manually via GCP console if needed"
+        fi
+
+    - name: Create WIF Provider with gcloud
+      if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      run: |
+        PROJECT_ID="${{ secrets.GCP_PROJECT_ID }}"
+        
+        echo "🔧 Creating WIF Provider with gcloud (outside Terraform)..."
+        
+        # Check if provider exists
+        if gcloud iam workload-identity-pools providers describe "github-provider" \
+          --location="global" \
+          --workload-identity-pool="product-baseline-pool" \
+          --project="${PROJECT_ID}" >/dev/null 2>&1; then
+          
+          echo "✓ WIF Provider already exists"
+          
+        else
+          echo "Creating WIF Provider..."
+          
+          gcloud iam workload-identity-pools providers create-oidc "github-provider" \
+            --location="global" \
+            --workload-identity-pool="product-baseline-pool" \
+            --project="${PROJECT_ID}" \
+            --issuer-uri="https://token.actions.githubusercontent.com" \
+            --allowed-audiences="https://github.com/stevei101" \
+            --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.aud=assertion.aud,attribute.job_workflow_ref=assertion.job_workflow_ref" \
+            --attribute-condition="assertion.repository=='stevei101/product-baseline-opensource'"
+          
+          echo "✓ WIF Provider created"
+        fi
+
+    - name: Final cleanup before apply
+      if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      working-directory: ./terraform
+      run: |
+        PROJECT_ID="${{ secrets.GCP_PROJECT_ID }}"
+        
+        echo "🔍 Final safety check for WIF Provider..."
+        
+        # Check if provider exists in GCP (more accurate check)
+        PROVIDER_DESCRIBE=$(gcloud iam workload-identity-pools providers describe "github-provider" \
+          --location="global" \
+          --workload-identity-pool="product-baseline-pool" \
+          --project="${PROJECT_ID}" 2>&1) || PROVIDER_EXISTS=false
+        
+        # Only act if provider actually exists (has 'name:' and no 'NOT_FOUND' error)
+        # NOTE: Provider is intentionally NOT managed by Terraform (causes 409 conflicts)
+        # It's created/managed via gcloud - see terraform/wif.tf for details
+        if [ "$PROVIDER_EXISTS" != "false" ] && echo "$PROVIDER_DESCRIBE" | grep -q "name:" && ! echo "$PROVIDER_DESCRIBE" | grep -q "NOT_FOUND"; then
+          echo "✓ Provider exists in GCP - managed via gcloud (not Terraform) - OK to proceed"
+        else
+          echo "✓ Provider does not exist - will be created by gcloud step - OK to proceed"
+        fi
+        
+        echo "✅ Safety check complete"
+
+    - name: Terraform Apply
+      if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      env:
+        TF_VAR_google_access_token: ${{ steps.auth.outputs.access_token }}
+      working-directory: ./terraform
+      run: |
+        # Apply with refresh enabled for accurate state
+        terraform apply -auto-approve -input=false -compact-warnings -refresh=true
+
+
+    - name: Clean up Network Endpoint Groups
+      if: github.event_name == 'workflow_dispatch' && github.event.inputs.destroy == 'true'
+      run: |
+        echo "🧹 Cleaning up Network Endpoint Groups that are blocking VPC deletion..."
+        
+        # Delete any remaining NEGs
+        NEGS=$(gcloud compute network-endpoint-groups list --format="value(name,zone)" --filter="name~'k8s1-28172fbd.*'" 2>/dev/null || true)
+        
+        if [ -n "$NEGS" ]; then
+          echo "Found Network Endpoint Groups to delete:"
+          echo "$NEGS"
+          
+          while IFS=$'\t' read -r name zone; do
+            if [ -n "$name" ] && [ -n "$zone" ]; then
+              echo "Deleting NEG: $name in zone $zone"
+              gcloud compute network-endpoint-groups delete "$name" --zone="$zone" --quiet 2>/dev/null || true
+            fi
+          done <<< "$NEGS"
+        else
+          echo "No Network Endpoint Groups found"
+        fi
+        
+        echo "✅ NEG cleanup complete"
+
+    - name: Wait for resource cleanup
+      if: github.event_name == 'workflow_dispatch' && github.event.inputs.destroy == 'true'
+      run: |
+        echo "⏳ Waiting 2 minutes for dependent resources to be cleaned up..."
+        sleep 120
+        echo "✅ Wait complete"
+
+    - name: Terraform Destroy
+      if: github.event_name == 'workflow_dispatch' && github.event.inputs.destroy == 'true'
+      env:
+        TF_VAR_google_access_token: ${{ steps.auth.outputs.access_token }}
+      working-directory: ./terraform
+      run: terraform destroy -auto-approve -compact-warnings
+
+    - name: Terraform Summary
+      if: always()
+      run: |
+        echo "## 🏗️ Terraform Cloud Workflow Complete" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Environment:** \`${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production') || (github.ref == 'refs/heads/develop' && 'staging') || 'development' }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Terraform Cloud Organization:** \`${{ env.TF_CLOUD_ORGANIZATION }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Terraform Cloud Workspace:** \`${{ env.TF_WORKSPACE }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Trigger:** \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Format Check | \`${{ steps.fmt.outcome }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Initialization | \`${{ steps.init.outcome }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Validation | \`${{ steps.validate.outcome }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Plan | \`${{ steps.plan.outcome }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "View the Terraform Cloud workspace: https://app.terraform.io/app/${{ env.TF_CLOUD_ORGANIZATION }}/workspaces/${{ env.TF_WORKSPACE }}" >> $GITHUB_STEP_SUMMARY
+
+# trigger: 2025-10-29T13:50:56Z
