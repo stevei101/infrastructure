@@ -1,23 +1,26 @@
 name: INFRA_VERIFICATION
 
 on:
-  push:
-    branches: ['**'] # Run on ALL branches for immediate feedback (FR#100)
-    paths:
-      - 'terraform/**'
-      - '.github/workflows/terraform.yml'
-  pull_request:
-    branches:
-      - main
-    paths:
-      - 'terraform/**'
-      - '.github/workflows/terraform.yml'
+  workflow_call:
+    inputs:
+      terraform_directory:
+        description: Path to the Terraform root that should be linted and planned.
+        required: false
+        type: string
+        default: terraform
+      run_apply:
+        description: When true, run terraform apply after validation (default mirrors main push behaviour).
+        required: false
+        type: boolean
+        default: false
 
 env:
   TF_VERSION: '1.5.0'
   GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
   TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
   TF_WORKSPACE: ${{ secrets.TF_WORKSPACE }}
+  TERRAFORM_DIR: ${{ github.event_name == 'workflow_call' && inputs.terraform_directory || 'terraform' }}
+  RUN_APPLY: ${{ github.event_name == 'workflow_call' && inputs.run_apply || (github.ref == 'refs/heads/main' && github.event_name == 'push') }}
 
 jobs:
   terraform:
@@ -52,18 +55,22 @@ jobs:
 
       - name: Terraform Format Check
         id: fmt
-        run: terraform fmt -check -recursive terraform/
+        run: terraform fmt -check -recursive ${{ env.TERRAFORM_DIR }}
         continue-on-error: true
 
       - name: Terraform Init
         id: init
-        working-directory: terraform
+        working-directory: ${{ env.TERRAFORM_DIR }}
         run: terraform init
 
       - name: Terraform Validate
         id: validate
-        working-directory: terraform
+        working-directory: ${{ env.TERRAFORM_DIR }}
         run: terraform validate -no-color
+
+      - name: Run Workload Identity Module Fixtures
+        if: hashFiles('terraform/modules/workload-identity/tests/run-tests.sh') != ''
+        run: terraform/modules/workload-identity/tests/run-tests.sh
 
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
@@ -72,7 +79,7 @@ jobs:
 
       - name: Run TFLint
         id: tflint
-        working-directory: terraform
+        working-directory: ${{ env.TERRAFORM_DIR }}
         run: tflint --format=default --recursive
         continue-on-error: true
 
@@ -80,14 +87,14 @@ jobs:
         id: tfsec
         uses: aquasecurity/tfsec-action@v1.0.0
         with:
-          working_directory: terraform
+          working_directory: ${{ env.TERRAFORM_DIR }}
           soft_fail: true
         continue-on-error: true
 
       - name: Terraform Plan
         id: plan
         if: github.event_name == 'pull_request'
-        working-directory: terraform
+        working-directory: ${{ env.TERRAFORM_DIR }}
         run: terraform plan -no-color -input=false
 
       - name: Comment PR
@@ -96,7 +103,7 @@ jobs:
         env:
           PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ github.token }}
           script: |
             const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
             #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
@@ -113,7 +120,7 @@ jobs:
 
             </details>
 
-            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`terraform\`, Workflow: \`${{ github.workflow }}\`*`;
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ env.TERRAFORM_DIR }}\`, Workflow: \`${{ github.workflow }}\`*`;
 
             github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -132,6 +139,6 @@ jobs:
           exit 1
 
       - name: Terraform Apply
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        working-directory: terraform
+        if: ${{ env.RUN_APPLY == 'true' }}
+        working-directory: ${{ env.TERRAFORM_DIR }}
         run: terraform apply -auto-approve -input=false
