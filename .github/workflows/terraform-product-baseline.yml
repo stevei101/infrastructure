@@ -66,8 +66,9 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Authenticate to Google Cloud via Workload Identity Federation
-      id: auth
+    - name: Authenticate to Google Cloud (Workload Identity)
+      id: auth_wif
+      if: secrets.WIF_PROVIDER != '' && secrets.WIF_SERVICE_ACCOUNT != ''
       uses: google-github-actions/auth@v2
       with:
         workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -75,12 +76,26 @@ jobs:
         token_format: 'access_token'
         access_token_lifetime: '3600s'
 
+    - name: Authenticate to Google Cloud (Service Account Key)
+      id: auth_key
+      if: (secrets.WIF_PROVIDER == '' || secrets.WIF_SERVICE_ACCOUNT == '') && secrets.GCP_SA_KEY != ''
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+        token_format: 'access_token'
+        access_token_lifetime: '3600s'
+
+    - name: Ensure authentication method configured
+      run: |
+        ACCESS_TOKEN="${{ steps.auth_wif.outputs.access_token || steps.auth_key.outputs.access_token }}"
+        if [ -z "$ACCESS_TOKEN" ]; then
+          echo "No Google Cloud authentication is configured. Set WIF_PROVIDER/WIF_SERVICE_ACCOUNT or GCP_SA_KEY secrets." >&2
+          exit 1
+        fi
+        echo "GOOGLE_OAUTH_ACCESS_TOKEN=$ACCESS_TOKEN" >> $GITHUB_ENV
+
     - name: Set up Cloud SDK
       uses: google-github-actions/setup-gcloud@v2
-
-    - name: Export GCP Credentials for Terraform
-      run: |
-        echo "GOOGLE_OAUTH_ACCESS_TOKEN=${{ steps.auth.outputs.access_token }}" >> $GITHUB_ENV
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
@@ -98,7 +113,7 @@ jobs:
     - name: Terraform Init
       id: init
       env:
-        TF_VAR_google_access_token: ${{ steps.auth.outputs.access_token }}
+        TF_VAR_google_access_token: ${{ steps.auth_wif.outputs.access_token || steps.auth_key.outputs.access_token }}
       working-directory: ./terraform
       run: terraform init -compact-warnings
 
@@ -264,7 +279,7 @@ jobs:
     - name: Terraform Validate
       id: validate
       env:
-        TF_VAR_google_access_token: ${{ steps.auth.outputs.access_token }}
+        TF_VAR_google_access_token: ${{ steps.auth_wif.outputs.access_token || steps.auth_key.outputs.access_token }}
       working-directory: ./terraform
       run: terraform validate -no-color -compact-warnings
 
@@ -272,7 +287,7 @@ jobs:
       id: plan
       if: github.event_name == 'pull_request'
       env:
-        TF_VAR_google_access_token: ${{ steps.auth.outputs.access_token }}
+        TF_VAR_google_access_token: ${{ steps.auth_wif.outputs.access_token || steps.auth_key.outputs.access_token }}
       working-directory: ./terraform
       run: terraform plan -no-color -input=false -compact-warnings
       continue-on-error: true
@@ -426,7 +441,7 @@ jobs:
     - name: Terraform Apply
       if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       env:
-        TF_VAR_google_access_token: ${{ steps.auth.outputs.access_token }}
+        TF_VAR_google_access_token: ${{ steps.auth_wif.outputs.access_token || steps.auth_key.outputs.access_token }}
       working-directory: ./terraform
       run: |
         # Apply with refresh enabled for accurate state
@@ -467,7 +482,7 @@ jobs:
     - name: Terraform Destroy
       if: github.event_name == 'workflow_dispatch' && github.event.inputs.destroy == 'true'
       env:
-        TF_VAR_google_access_token: ${{ steps.auth.outputs.access_token }}
+        TF_VAR_google_access_token: ${{ steps.auth_wif.outputs.access_token || steps.auth_key.outputs.access_token }}
       working-directory: ./terraform
       run: terraform destroy -auto-approve -compact-warnings
 
