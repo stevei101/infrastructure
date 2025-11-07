@@ -136,4 +136,4 @@ The reusable workflow already has access to the default `github.token`, so addit
 
 ### Shared Terraform Modules
 
-Shared modules (for example `
+Shared modules (for example `terraform/modules/network`) can be referenced in project-specific Terraform configurations to promote reuse and consistency across projects.
