@@ -139,6 +139,6 @@ jobs:
           exit 1
 
       - name: Terraform Apply
-        if: ${{ env.RUN_APPLY == 'true' }}
+        if: inputs.run_apply
         working-directory: ${{ env.TERRAFORM_DIR }}
         run: terraform apply -auto-approve -input=false
