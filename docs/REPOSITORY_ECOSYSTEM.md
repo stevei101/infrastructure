@@ -53,16 +53,21 @@ gh repo create my-new-project --template stevei101/ibm-template-project
 
 **What it provides**:
 - Terraform configurations for all projects
-- Reusable Terraform workflows
+- Reusable Terraform workflows (`workflow_call` enabled)
 - Infrastructure patterns and best practices
 - Terraform Cloud integration
+- Tested, versioned Terraform modules (for example `terraform/modules/workload-identity` with fixture validation)
 
 **Usage**:
 ```yaml
 # In project's .github/workflows/terraform.yml
 jobs:
   terraform:
-    uses: stevei101/infrastructure/.github/workflows/terraform-agentnav-reusable.yml@main
+    uses: stevei101/infrastructure/.github/workflows/terraform-agentnav.yml@<tag>
+    with:
+      terraform_directory: terraform
+      run_apply: false
+    secrets: inherit
 ```
 
 ### 3. Podman/Kustomize Repository: `podman-kustomize-k8s-deploy-gha`
@@ -105,11 +110,11 @@ on:
 
 jobs:
   terraform:
-    uses: stevei101/infrastructure/.github/workflows/terraform-agentnav-reusable.yml@main
-    secrets:
-      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-      TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
-      # ... other secrets
+    uses: stevei101/infrastructure/.github/workflows/terraform-agentnav.yml@<tag>
+    with:
+      terraform_directory: terraform
+      run_apply: false
+    secrets: inherit
 ```
 
 ### Step 3: Add Container Builds
@@ -224,4 +229,20 @@ jobs:
 | `ibm-template-project` | Project template | Existing | Nascent |
 | `infrastructure` | Terraform/IaC | FR 008 | Ready |
 | `podman-kustomize-k8s-deploy-gha` | Containers/K8s | FR 009 | Ready |
+
+## Shared Module Pattern
+
+1. **Author in `stevei101/infrastructure`**
+   - Implement the module under `terraform/modules/<module-name>`.
+   - Ship fixtures in `terraform/modules/<module-name>/tests/` with a `run-tests.sh` helper.
+   - Update the CHANGELOG/readme and tag a release.
+2. **Continuous Validation**
+   - The shared `terraform-agentnav.yml` workflow automatically executes module fixtures when present.
+   - Downstream repositories inherit this check (step is gated by `hashFiles(...)` so it only runs when the module lives in the repo).
+3. **Consume from applications**
+   - Point Terraform `source` blocks at the tagged module version, e.g. `source = "github.com/stevei101/infrastructure//terraform/modules/workload-identity?ref=v1.0.0"`.
+   - Reference the reusable workflow via `uses:` as shown above for consistent CI.
+4. **Upgrade cadence**
+   - Application repos pin to a tag and upgrade via PR after running the module fixtures locally.
+   - The infra repo publishes release notes for each shared module update.
 
