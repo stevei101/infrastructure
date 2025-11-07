@@ -39,7 +39,7 @@ jobs:
           working_directory: terraform/${{ matrix.project }}
           soft_fail: true
           format: default
-          severity: "MEDIUM,HIGH,CRITICAL"
+          minimum_severity: "MEDIUM"
 
       - name: Comment PR with TFSec Results
         if: github.event_name == 'pull_request'

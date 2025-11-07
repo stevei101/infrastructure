@@ -15,6 +15,10 @@ This Terraform configuration provisions:
 - **Staging Environment** Cloud Run services (frontend-staging, backend-staging)
 - **Cloud Build Triggers** for automatic "Connect Repo" deployments from GitHub (frontend & backend)
 
+> Prompt Vault infrastructure now lives in the standalone
+> [`stevei101/prompt-vault`](https://github.com/stevei101/prompt-vault) repository;
+> this module provisions only the AgentNav frontend/backend stack.
+
 ## Prerequisites
 
 1. **Google Cloud Project** with billing enabled

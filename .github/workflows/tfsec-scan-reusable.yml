@@ -8,19 +8,16 @@ on:
         required: false
         default: 'terraform'
         type: string
-      severity_levels:
-        description: 'Comma-separated severity levels to check (MEDIUM,HIGH,CRITICAL)'
+      minimum_severity:
+        description: 'Minimum severity level to report (CRITICAL, HIGH, MEDIUM, LOW)'
         required: false
-        default: 'MEDIUM,HIGH,CRITICAL'
+        default: 'MEDIUM'
         type: string
       fail_on_issues:
         description: 'Fail the workflow if security issues are found'
         required: false
-        default: 'true'
+        default: true
         type: boolean
-    secrets:
-      GITHUB_TOKEN:
-        required: true
 
 jobs:
   tfsec:
@@ -40,19 +37,19 @@ jobs:
         uses: aquasecurity/tfsec-action@v1.0.0
         with:
           working_directory: ${{ inputs.terraform_path }}
-          soft_fail: ${{ !inputs.fail_on_issues }}
+          soft_fail: ${{ inputs.fail_on_issues != true }}
           format: default
-          severity: ${{ inputs.severity_levels }}
+          additional_args: --minimum-severity=${{ inputs.minimum_severity }}
 
       - name: Comment PR with TFSec Results
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ github.token }}
           script: |
             const output = `#### TFSec Security Scan 🔒 \`${{ steps.tfsec.outcome }}\`
 
-            TFSec scanned Terraform configuration at \`${{ inputs.terraform_path }}\`.
+            TFSec scanned Terraform configuration at \`${{ inputs.terraform_path }}\` using minimum severity \`${{ inputs.minimum_severity }}\`.
 
             <details><summary>View Scan Details</summary>
 
@@ -70,7 +67,7 @@ jobs:
             })
 
       - name: Fail if Critical Issues Found
-        if: steps.tfsec.outcome == 'failure' && inputs.fail_on_issues == 'true'
+        if: steps.tfsec.outcome == 'failure' && inputs.fail_on_issues == true
         run: |
           echo "❌ TFSec found security issues in ${{ inputs.terraform_path }}"
           echo "Please review the scan results above and fix any security vulnerabilities."

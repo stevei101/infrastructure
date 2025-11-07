@@ -79,8 +79,9 @@ stevei101/infrastructure/
          TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
          WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
          WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
    ```
+
+The reusable workflow already has access to the default `github.token`, so no additional secret is required for posting Terraform plan comments.
 
 3. **Remove the Terraform directory** (or keep as a reference):
    ```bash
