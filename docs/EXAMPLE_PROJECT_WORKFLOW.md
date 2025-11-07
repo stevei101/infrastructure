@@ -32,7 +32,6 @@ jobs:
       TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
       WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ## For product-baseline-opensource Project
@@ -88,12 +87,11 @@ jobs:
       TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
       WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ## Required GitHub Secrets
 
-Each project repository must have the following secrets configured:
+Each project repository must have the following secrets configured (the reusable workflow receives the default `github.token` automatically, so no additional secret is needed for PR comments):
 
 - `GCP_PROJECT_ID` - Google Cloud Project ID
 - `TF_CLOUD_ORGANIZATION` - Terraform Cloud organization name (e.g., `disposable-org`)
@@ -101,7 +99,6 @@ Each project repository must have the following secrets configured:
 - `TF_API_TOKEN` - Terraform Cloud API token
 - `WIF_PROVIDER` - Workload Identity Federation provider
 - `WIF_SERVICE_ACCOUNT` - Workload Identity Federation service account email
-- `GITHUB_TOKEN` - Automatically provided by GitHub Actions
 
 ## Alternative: Direct Workflow (Not Recommended)
 
