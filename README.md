@@ -90,84 +90,50 @@ The repository includes automated TFSec security scanning:
 # In your project's .github/workflows/security.yml
 jobs:
   tfsec:
-    uses: stevei101/infrastructure/.github/workflows/tfsec-scan-reusable.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+    uses: stevei101/infrastructure/.github/workflows/tfsec-scan-reusable.yml@v1.0.0
     with:
       terraform_path: 'terraform'
       minimum_severity: 'MEDIUM'
       fail_on_issues: true
-    secrets:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ### Using GitHub Actions Workflows
 
-The workflows in `.github/workflows/` are designed to be called from the respective project repositories. Each project repository should reference these workflows using the `workflow_call` trigger.
+The workflows in `.github/workflows/` are designed to be called from the respective project repositories via `uses:`. Each project repository should reference these workflows and pass the Terraform directory and apply behaviour explicitly.
 
-**Example** (in project repository's workflow file):
+**Example** (project repository `.github/workflows/terraform.yml`):
 
 ```yaml
 name: Infrastructure Verification
 
 on:
-  workflow_call:
   push:
+    branches: ['**']
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/terraform.yml'
+  pull_request:
+    branches:
+      - main
     paths:
       - 'terraform/**'
       - '.github/workflows/terraform.yml'
 
 jobs:
   terraform:
-    uses: stevei101/infrastructure/.github/workflows/terraform-agentnav.yml@main
+    uses: stevei101/infrastructure/.github/workflows/terraform-agentnav.yml@<tag>
+    with:
+      terraform_directory: terraform
+      run_apply: false
+    secrets: inherit
 ```
 
-## Terraform Cloud Configuration
+The reusable workflow already has access to the default `github.token`, so additional secrets are not required for posting plan comments as long as the calling workflow grants `pull-requests: write` permissions.
 
-Both projects use Terraform Cloud for remote state management:
+### Shared Terraform Modules
 
-- **Organization**: `disposable-org`
-- **Workspaces**: 
-  - `agentnav`
-  - `product-baseline-opensource`
-
-### Required Secrets
-
-Each project requires the following GitHub Secrets:
-
-- `GCP_PROJECT_ID` - Google Cloud Project ID
-- `TF_CLOUD_ORGANIZATION` - Terraform Cloud organization name
-- `TF_WORKSPACE` - Terraform Cloud workspace name
-- `TF_API_TOKEN` - Terraform Cloud API token
-- `WIF_PROVIDER` - Workload Identity Federation provider
-- `WIF_SERVICE_ACCOUNT` - Workload Identity Federation service account email
-
-## Migration Notes
-
-This repository was created by extracting infrastructure code from:
-- `stevei101/agentnav` → `infrastructure/terraform/agentnav/`
-- `stevei101/product-baseline-opensource` → `infrastructure/terraform/product-baseline-opensource/`
-
-The original project repositories should be updated to reference this infrastructure repository for Terraform operations.
-
-## Related Repositories
-
-- **Template Repository**: [stevei101/ibm-template-project](https://github.com/stevei101/ibm-template-project) - Template for new projects
-- **Podman/Kustomize**: `stevei101/podman-kustomize-k8s-deploy-gha` - Container builds and K8s deployments (FR 009)
-
-## Contributing
-
-When adding new infrastructure:
-
-1. Create a new directory under `terraform/` for your project
-2. Add a corresponding workflow file in `.github/workflows/`
-3. Update this README with project details
-4. Follow the existing patterns for consistency
-
-## Documentation
-
-- [Agentnav Terraform README](terraform/agentnav/README.md)
-- [Product Baseline Terraform Documentation](terraform/product-baseline-opensource/)
-
-## License
-
-This repository follows the same license as the parent organization's projects.
-
+Shared modules (for example `
